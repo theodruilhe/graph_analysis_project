@@ -1,0 +1,502 @@
+---
+title: "Graph Analysis"
+author: "Théo Druilhe et Sigurd"
+date: "2025-04-15"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library}
+library(igraph)
+library(stringr)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+```
+
+```{r data}
+# Nodes data
+path_nodes <- "C:/Users/cindy/Documents/M2 SE/Graph Analysis/Projet/nodes.csv"
+#path_nodes <- "C:/Users/pouss/OneDrive/Bureau/R/Data/spotify_data/nodes.csv"
+nodes <- read.csv(path_nodes, encoding = "UTF-8")
+  
+# Edges data
+path_edges <- "C:/Users/cindy/Documents/M2 SE/Graph Analysis/Projet/edges.csv"
+#path_edges <- "C:/Users/pouss/OneDrive/Bureau/R/Data/spotify_data/edges.csv"
+edges <- read.csv(path_edges, encoding = "UTF-8")
+```
+
+
+# Cleaning of the data
+
+```{r cleaned data}
+
+# Followers > 5 000 000
+nodes <- nodes[nodes$followers > 5000000, ]
+nodes <- na.omit(nodes)
+
+
+    # Clean the 'genres' variable
+
+# Convert the 'genres' column to characters
+nodes$genres <- as.character(nodes$genres)
+
+# Convert the 'genres' column to lists
+nodes$genres <- lapply(nodes$genres, function(x) if (is.character(x)) strsplit(x, ", ")[[1]] else NA)
+
+# Extract the first element of the 'genres' list for each row
+nodes$genre <- sapply(nodes$genres, function(x) ifelse(length(x) > 0, x[1], NA))
+
+# Remove characters
+nodes$genre <- sub("\\[", "", nodes$genre)
+nodes$genre <- sub("\\]", "", nodes$genre)
+nodes$genre <- sub("'", "", nodes$genre)
+nodes$genre <- sub("'", "", nodes$genre)
+nodes$genre <- as.character(nodes$genre)
+
+# Classify genres
+nodes <- nodes %>%
+  mutate(genre_category = case_when(
+    grepl("rock", genre, ignore.case = TRUE) ~ "rock",
+    grepl("hip hop", genre, ignore.case = TRUE) ~ "hip hop",
+    grepl(" pop", genre, ignore.case = TRUE) ~ "pop",
+    grepl("rap", genre, ignore.case = TRUE) ~ "rap",
+    grepl("funk", genre, ignore.case = TRUE) ~ "funk",
+    grepl("r&b", genre, ignore.case = TRUE) ~ "r&b",
+    grepl("electro", genre, ignore.case = TRUE) ~ "electro",
+    TRUE ~ NA_character_
+  ))
+nodes$genre_category <- ifelse(is.na(nodes$genre_category), nodes$genre, nodes$genre_category)
+
+
+    # Cleaning the edges
+
+# Merge to get artist names in edges and keep only nodes > 5M
+edges <- merge(edges, nodes, by.x = "id_1", by.y = "spotify_id", all.x = FALSE)
+names(edges)[names(edges) == "name"] <- "name_1"
+edges <- edges[, c("name_1", "id_0")]
+
+edges <- merge(edges, nodes, by.x = "id_0", by.y = "spotify_id", all.x = FALSE)
+names(edges)[names(edges) == "name"] <- "name_0"
+edges <- edges[, c("name_0","name_1")]
+```
+
+# Creation of the graph
+
+```{r graph, fig.align = "center"}
+# Create a graph object from the data
+g <- graph_from_data_frame(edges,  directed = FALSE)
+
+# Remove nodes that have no edges: we go from 429 to 359
+nodes <- nodes[nodes$name %in% V(g)$name, ]
+
+# Identify genre categories with less than 5 occurrences and set to "other"
+genre_counts <- table(nodes$genre_category)
+categories_to_merge <- names(genre_counts[genre_counts < 5])
+nodes$genre_category <- ifelse(nodes$genre_category %in% categories_to_merge, "other",nodes$genre_category)
+
+# to identify indices in both tables (since names not in the correct order)
+node_indices <- match(V(g)$name, nodes$name)
+
+# Add attributes
+V(g)$followers <- nodes$followers[node_indices]
+V(g)$popularity <- nodes$popularity[node_indices]
+V(g)$genre <- nodes$genre[node_indices]
+V(g)$genre_category <- nodes$genre_category[node_indices]
+
+
+# Add the degree of each node
+nodes$degree <- NA
+for (i in 1:nrow(nodes)) {
+    # Find the node id corresponding to node name
+    node_id <- V(g)[name == nodes$name[i]]$name
+    # Get the degree of the node
+    node_degree <- degree(g, v = node_id)
+    # Add the degree to the nodes dataframe
+    nodes$degree[i] <- node_degree
+}
+V(g)$degree <- nodes$degree[node_indices]
+
+# Define popularity colors in desired order
+popularity_colors <- c("#FEF0D9", "#FDCC8A", "#FC8D59","#E34A33", "#B30000")
+vertex_colors <- cut(V(g)$popularity, breaks = 5, labels = popularity_colors)
+
+# Create a label vector for popularity levels
+popularity_labels <- c("Lowest", "Low", "Moderate", "High", "Highest")
+
+# Visualize the graph with node colors based on musical genre
+plot(g, 
+     layout = layout_with_fr,
+     edge.color = rgb(0, 0, 0, 0.15),
+     vertex.color = as.character(vertex_colors),
+     vertex.label = V(g)$name, 
+     vertex.label.cex = 0.6, 
+     vertex.label.color = "black", 
+     vertex.label.dist = 0.5,
+     vertex.size = log(V(g)$degree+5))
+
+# Create a combined legend for popularity colors and node sizes
+par(xpd=TRUE)
+legend("topright", legend = popularity_labels, fill = popularity_colors, title = "Popularity Level", cex = 0.6)
+legend("bottomright", legend = c("Low Degree", "High Degree"), 
+       pch = c(21, 21), pt.bg = c("white", "white"),
+       pt.cex = c(log(1 + 3), log(max(V(g)$degree))),
+       lwd = 1, lty = 1, , cex = 0.6, title = "Node Size", bty = "n")
+
+```
+
+```{r function to verify}
+# Function to compare genre_category attributes between the graph and the dataframe
+# You need to change the attribute you wish to test within the function
+
+compare_genre_categories <- function(graph, dataframe) {
+  different_nodes <- c()
+  for (i in 1:length(V(graph)$name)) {
+    if (subset(dataframe$genre_category, dataframe$name == V(graph)$name[i]) != 
+        subset(V(graph)$genre_category, V(graph)$name == V(graph)$name[i])) {
+      different_nodes <- c(different_nodes, V(graph)$name[i])
+    }
+  }
+  return(different_nodes)
+}
+
+# Using the function to find node names with different attributes
+nodes_with_different_categories <- compare_genre_categories(g, nodes)
+```
+
+
+# CUG test
+
+```{r qst3_cug, fig.align = "center"}
+cor_g <- cor(V(g)$degree, V(g)$popularity)
+cor_g # 0.45
+
+# Correlation plot between degree and popularity
+df <- data.frame(popularity = V(g)$popularity,
+  degree = V(g)$degree)
+ggplot(df, aes(x = degree, y = popularity)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE)+
+  theme_minimal()
+
+# Generate 100 Erdos-Renyi graphs with the same nodes as graph g
+erdosgraphs <- lapply(1:1000, function(x) sample_gnm(n = vcount(g), m = ecount(g), directed = FALSE))
+
+# Retrieve artist names from nodes$names
+artist_names <- V(g)$name
+
+# Add artist names to the nodes of each graph
+for (i in seq_along(erdosgraphs)) {
+  V(erdosgraphs[[i]])$name <- artist_names
+}
+
+# Add the degree attribute to each node in each graph
+for (i in seq_along(erdosgraphs)) {
+  deg <- degree(erdosgraphs[[i]])
+  V(erdosgraphs[[i]])$degree <- deg
+  for (j in 1:vcount(erdosgraphs[[i]])) {
+    artist_name <- V(erdosgraphs[[i]])$name[j]
+    popularity <- nodes[nodes$name == artist_name, "popularity"]
+    V(erdosgraphs[[i]])$popularity[j] <- popularity
+  }
+}
+
+# Calculate the correlation for each random graph
+corr_erdosgraphs <- lapply(erdosgraphs, FUN = function(graph){cor(V(graph)$degree, V(graph)$popularity)})
+summary(unlist(corr_erdosgraphs))
+
+# Plot
+ggplot(data = data.frame(correlation = unlist(corr_erdosgraphs))) +
+  geom_histogram(aes(x=correlation),binwidth = 0.005, fill = "lightblue", color = "black") + 
+  geom_vline(aes(xintercept=cor_g), color="red", linetype = "dashed", size = 1) +
+  labs(x = "Correlation", y = "Frequency", title = "CUG test (reference model: Erdös-Renyi)") +
+  theme_minimal()
+
+# P-value
+erdos_new_index_p <- sum(unlist(corr_erdosgraphs) >= cor_g)/1000
+erdos_new_index_p # 0
+```
+
+
+# QAP test
+
+```{r qst3_qap, fig.align = "center"}
+# Generate random permutations of popularity
+n_permutations <- 1000
+
+# Initialize a vector to store permuted correlations
+permuted_correlations <- numeric(n_permutations)
+
+# Loop to generate permutations and calculate correlations
+for (i in 1:n_permutations) {
+  # Permute popularity values
+  permuted_popularity <- sample(V(g)$popularity)
+  
+  # Calculate correlation with degrees
+  permuted_correlations[i] <- cor(permuted_popularity, V(g)$degree)
+}
+
+summary(permuted_correlations)
+
+# P-value
+qap_stat <- sum(permuted_correlations >= cor_g)/1000
+qap_stat # 0
+
+# Plot
+ggplot(data = data.frame(correlation = permuted_correlations), aes(x = correlation)) +
+  geom_histogram(binwidth = 0.005, fill = "lightblue", color = "black") +
+  geom_vline(xintercept = cor_g, color = "red", linetype = "dashed", size = 1) +
+  labs(x = "Correlation", y = "Frequency", title = "QAP test (randomized popularity attributes)") +
+  theme_minimal()
+```
+
+# Description of the data
+
+```{r qst4, , fig.align = "center"}
+
+# Number of edges and vertex
+print(vcount(g))
+print(ecount(g))
+
+# Degree : scale free if its degree d° follows a power law 
+g_degrees <- degree(g)
+ggplot(data.frame(degree=g_degrees), aes(degree)) + geom_bar(fill = "lightblue", color = "black") + 
+  labs(title="Degree distribution", x = "Degree") + theme_minimal()
+mean(degree(g))
+summary(degree(g))
+
+
+# Small world property : SMALL average path length + HIGH clustering coefficient
+average.path.length(g) # 2.96
+
+
+# Clustering coefficient
+transitivity(g, type = "undirected") # 0.319
+
+
+# Density
+edge_density(g) # 0.04098909
+mean(degree(g))/(vcount(g)-1)
+2*ecount(g)/(vcount(g)*(vcount(g)-1)) # density
+
+
+# Centrality measure NODES
+#closeness(g, directed = FALSE) # how close a node is from the other nodes
+#betweenness(g, directed = FALSE) # how many shortest paths go through a node
+#eigen_centrality(g, directed = FALSE)
+cor(betweenness(g, directed = FALSE), V(g)$followers)
+cor(betweenness(g, directed = FALSE), V(g)$popularity)
+cor(eigen_centrality(g, directed = FALSE)$vector, V(g)$followers)
+cor(eigen_centrality(g, directed = FALSE)$vector, V(g)$popularity)
+
+
+# Other
+diameter(g)
+reciprocity(g)
+# betweenness(g, directed = FALSE)
+```
+
+# Communities
+
+```{r qst5, fig.align = "center"}
+louvain <- cluster_louvain(g)
+
+leiden <- cluster_leiden(g, objective_function = "modularity")
+
+eb_clusters <- cluster_edge_betweenness(g) 
+# Cet algorithme identifie les clusters en supprimant les arêtes ayant le plus grand betweenness (nombre de plus courts chemins passant par une arête). 
+
+infomap_clusters <- cluster_infomap(g) 
+#  Basé sur la théorie de l'information, Infomap tente de trouver des partitions qui minimisent la longueur de la description d'une marche aléatoire sur le graphe.
+
+walktrap_clusters <- cluster_walktrap(g)
+
+lpa_clusters <- cluster_label_prop(g)
+
+fg_clusters <- cluster_fast_greedy(g) 
+# Un algorithme hiérarchique basé sur une approche gloutonne pour maximiser la modularité. Lorsqu'on parle d'un algorithme "glouton" (greedy en anglais), cela signifie qu'il prend des décisions locales optimales à chaque étape dans l'espoir d'obtenir une solution globale optimale. Les algorithmes gloutons fonctionnent en faisant des choix locaux qui semblent être les meilleurs à chaque étape, sans regarder l'image complète. 
+
+modularity(g,louvain$membership)
+modularity(g,leiden$membership)
+modularity(g,eb_clusters$membership)
+modularity(g,infomap_clusters$membership)
+modularity(g,walktrap_clusters$membership)
+modularity(g,lpa_clusters$membership)
+modularity(g,fg_clusters$membership)
+# leiden car plus grande modularité 
+
+plot(g, 
+     vertex.size = (V(g)$followers)/10000000,
+     vertex.label = V(g)$name,
+     edge.color = rgb(0,0,0,.15),
+     vertex.label.color = leiden$membership,
+     vertex.label.cex = 0.6, 
+     vertex.label.color = "black", 
+     vertex.label.dist = 0.5,
+     main=paste("Leiden approach\n(Modularity =", round(modularity(g,leiden$membership), digits=2),"| Clusters =",max(leiden$membership),")")) 
+```
+
+
+# Communities analysis
+
+```{r plot_commu, fig.align = "center"}
+# Create a custom color palette
+custom_colors <- c("red", "blue", "green", "orange", "purple", "cyan", "magenta", "yellow")
+
+# Plot the graph with adjustments
+plot(g,
+     layout = layout_with_fr,
+     vertex.size = 2,
+     edge.color = rgb(0, 0, 0, 0.15),
+     vertex.color = custom_colors[leiden$membership],
+    #vertex.label = ifelse((V(g)$followers/10000000) > 2, V(g)$name, NA),
+     vertex.label.cex = 0.6, 
+     vertex.label.color = "black", 
+     main = paste("Leiden communities\n(Modularity =", round(modularity(g, leiden$membership), digits = 2), "| Clusters =", max(leiden$membership), ")"),
+     width = 20, # Set window width to 10 inches
+     height = 20) # Set window height to 10 inches
+
+# Legend for community colors
+legend("topright", legend = unique(leiden$membership), fill = custom_colors, title = "Community", cex = 0.7)
+
+```
+
+```{r analyse_community}
+set.seed(123)
+# Create a vector of community membership based on artist name
+community_membership <- leiden$membership[match(nodes$name, leiden$name)]
+
+# Add the community membership vector to the nodes dataframe
+nodes$community <- community_membership
+
+
+    # Followers
+
+# Display the distribution of followers for each group
+summary_by_community <- nodes %>%
+  group_by(community) %>%
+  summarize(
+    n_observation = n(), 
+    min_followers = min(followers)/100000,
+    max_followers = max(followers)/100000,
+    median_followers = median(followers)/100000,
+    mean_followers = mean(followers)/100000
+  )
+
+# Display the summary
+print(summary_by_community)
+
+
+    # Popularity
+
+# Display the distribution of popularity for each group
+summary_by_community_popularity <- nodes %>%
+  group_by(community) %>%
+  summarize(
+    n_observation = n(), 
+    min_popularity = min(popularity),
+    max_popularity = max(popularity),
+    median_popularity = median(popularity),
+    mean_popularity = mean(popularity)
+  )
+
+# Display the summary
+print(summary_by_community_popularity)
+
+
+    # Collaboration Count
+
+# Display the distribution of collaboration count for each group
+summary_by_community_degree <- nodes %>%
+  group_by(community) %>%
+  summarize(
+    n_observation = n(), 
+    min_degree = min(degree),
+    max_degree = max(degree),
+    median_degree = median(degree),
+    mean_degree = mean(degree)
+  )
+
+# Display the summary
+print(summary_by_community_degree)
+
+
+    # Genre
+
+# Create a cross-tabulation to count occurrences of each genre in each community
+table_by_community_genre <- table(nodes$community, nodes$genre_category)
+
+# Display the table
+print(table_by_community_genre)
+
+
+# Initialize matrix to store results
+collab_matrix <- matrix(0, nrow = max(nodes$community), ncol = max(nodes$community))
+
+# Loop through each edge
+for (i in 1:nrow(edges)) {
+  # Find the communities of the two artists involved in the edge
+  community_1 <- nodes$community[nodes$name == edges$name_0[i]]
+  community_2 <- nodes$community[nodes$name == edges$name_1[i]]
+  
+  # Check if the artists belong to the same community
+  if (community_1 == community_2) {
+    # Increment intra-community collaboration count on diagonal
+    collab_matrix[community_1, community_2] <- collab_matrix[community_1, community_2] + 1
+  } else {
+    # Increment inter-community collaboration count off-diagonal
+    collab_matrix[community_1, community_2] <- collab_matrix[community_1, community_2] + 1
+    collab_matrix[community_2, community_1] <- collab_matrix[community_2, community_1] + 1
+  }
+}
+
+# Display the matrix
+print(collab_matrix)
+
+# Connection Density
+community_density <- numeric(max(nodes$community))
+for (i in 1:max(nodes$community)) {
+  subgraph <- induced_subgraph(g, V(g)[nodes$community == i])
+  community_density[i] <- edge_density(subgraph)
+}
+
+# Display connection densities for each community
+cat("Connection densities for each community:", community_density, "\n")
+```
+
+```{r graph_pop, fig.align = "center"}
+# Define popularity colors in the desired order
+popularity_colors <- c("#FEF0D9", "#FDCC8A", "#FC8D59","#E34A33", "#B30000")
+vertex_colors <- cut(V(g)$popularity, breaks = 5, labels = popularity_colors)
+
+# Define custom colors for Leiden groups
+leiden_colors <- adjustcolor(brewer.pal(n = 8, name = "Pastel1"), alpha.f = 0.5)
+
+# Display group names in the legend
+legend_labels <- 1:max(leiden$membership)
+
+# Visualize the graph with colors based on Leiden groups
+plot(g, 
+     layout = layout_with_fr,
+     edge.color = rgb(0, 0, 0, 0.15),
+     vertex.color = as.character(vertex_colors),
+     vertex.label = V(g)$name, 
+     vertex.label.cex = 0.6, 
+     vertex.label.color = "black", 
+     vertex.label.dist = 0.5,
+     vertex.size = 2,
+     mark.groups = leiden,
+     mark.col = leiden_colors,
+     mark.border = NA) 
+
+# Add a legend for Leiden groups
+legend("bottomright", legend = legend_labels, fill = leiden_colors, title = "Community", cex = 0.7)
+
+# Add a legend for popularity colors
+legend("topright", legend = popularity_labels, fill = popularity_colors, title = "Popularity Level", cex = 0.7)
+```
+
